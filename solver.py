@@ -1,59 +1,70 @@
 import pulp
-import pandas as pd
 
-# 1. Входные данные (те параметры, что мы обсудили)
-warehouses = ["Склад 1", "Склад 2"]
-supply = {"Склад 1": 130, "Склад 2": 90}
+# 1. Входные данные (оцифровка с картинки)
+suppliers = ["П1", "П2"]
+dcs = ["РЦ1", "РЦ2", "РЦ3"]
+stores = ["М1", "М2", "М3", "М4"]
 
-stores = ["Магнит Семейный 1", "Магнит Экстра 1", "Магнит Экстра 2", "Магнит Семейный 2"]
-demand = {
-    "Магнит Семейный 1": 40,
-    "Магнит Экстра 1": 70,
-    "Магнит Экстра 2": 60,
-    "Магнит Семейный 2": 50
+# Вычисленная потребность каждого магазина
+demand = {"М1": 15, "М2": 15, "М3": 15, "М4": 15}
+
+# Затраты на логистику (за 1 единицу)
+cost_p_rc = {
+    "П1": {"РЦ1": 10, "РЦ2": 50, "РЦ3": 30},
+    "П2": {"РЦ1": 50, "РЦ2": 40, "РЦ3": 15}
+}
+cost_rc_m = {
+    "РЦ1": {"М1": 2, "М2": 2, "М3": 50, "М4": 50},
+    "РЦ2": {"М1": 50, "М2": 50, "М3": 1, "М4": 1},
+    "РЦ3": {"М1": 35, "М2": 20, "М3": 10, "М4": 5}
 }
 
-# 2. Получение матрицы расстояний (здесь имитируем данные из вашего matrix.py)
-# В реальности вы можете импортировать результат или вставить значения вручную
-costs = {
-    "Склад 1": {"Магнит Семейный 1": 4.5, "Магнит Экстра 1": 10.2, "Магнит Экстра 2": 15.8, "Магнит Семейный 2": 16.5},
-    "Склад 2": {"Магнит Семейный 1": 18.2, "Магнит Экстра 1": 12.1, "Магнит Экстра 2": 7.4, "Магнит Семейный 2": 6.8}
-}
+# Характеристики машины (выбираем Тип 1, так как он очевидно выгоднее для прямых рейсов)
+vehicle_cap = 15
+vehicle_fixed_cost = 1500
 
-# 3. Инициализация модели
-model = pulp.LpProblem("Transportation_Optimization", pulp.LpMinimize)
+# 2. Инициализация модели
+model = pulp.LpProblem("MultiEchelon_Optimization", pulp.LpMinimize)
 
-# 4. Создание переменных решения (x_ij)
-# Это количество паллет, отправленных со склада i в магазин j
-routes = [(w, s) for w in warehouses for s in stores]
-x = pulp.LpVariable.dicts("Route", (warehouses, stores), lowBound=0, cat='Integer')
+# 3. Переменные
+# x[p][dc][m] - объем товара, идущего транзитом от П через РЦ в М
+x = pulp.LpVariable.dicts("Flow", 
+                          ((p, dc, m) for p in suppliers for dc in dcs for m in stores), 
+                          lowBound=0, cat='Integer')
 
-# 5. Целевая функция: минимизация суммарного расстояния (дистанция * паллеты)
-model += pulp.lpSum([x[w][s] * costs[w][s] for (w, s) in routes])
+# v[dc][m] - количество нанятых машин от РЦ до Магазина
+v = pulp.LpVariable.dicts("Vehicles",
+                          ((dc, m) for dc in dcs for m in stores),
+                          lowBound=0, cat='Integer')
 
-# 6. Ограничения
-# Ограничение по запасам на складах
-for w in warehouses:
-    model += pulp.lpSum([x[w][s] for s in stores]) == supply[w]
+# 4. Целевая функция: Переменные (на единицу) + Фиксированные (на машину)
+var_costs = pulp.lpSum([x[p, dc, m] * (cost_p_rc[p][dc] + cost_rc_m[dc][m]) 
+                        for p in suppliers for dc in dcs for m in stores])
+fixed_costs = pulp.lpSum([v[dc, m] * vehicle_fixed_cost for dc in dcs for m in stores])
 
-# Ограничение по потребностям магазинов
-for s in stores:
-    model += pulp.lpSum([x[w][s] for w in warehouses]) == demand[s]
+model += var_costs + fixed_costs
 
-# 7. Решение задачи
-status = model.solve(pulp.PULP_CBC_CMD(msg=0))
+# 5. Ограничения:
+# Спрос каждого магазина должен быть закрыт
+for m in stores:
+    model += pulp.lpSum([x[p, dc, m] for p in suppliers for dc in dcs]) == demand[m]
+    
+# Объем перевозки не может превышать суммарную вместимость нанятых машин
+for dc in dcs:
+    for m in stores:
+        model += pulp.lpSum([x[p, dc, m] for p in suppliers]) <= v[dc, m] * vehicle_cap
 
-# 8. Вывод результатов
-print(f"Статус решения: {pulp.LpStatus[status]}")
+# 6. Решение
+model.solve(pulp.PULP_CBC_CMD(msg=0))
 
-results = []
-for w in warehouses:
-    for s in stores:
-        if x[w][s].varValue > 0:
-            results.append({"Откуда": w, "Куда": s, "Сколько (паллет)": x[w][s].varValue})
+print(f"Статус решения: {pulp.LpStatus[model.status]}")
+print(f"Оптимальные общие затраты (F): {int(pulp.value(model.objective))}\n")
 
-df_res = pd.DataFrame(results)
-print("\nОптимальный план перевозок:")
-print(df_res)
-
-print(f"\nОбщие логистические затраты (условные км-паллеты): {pulp.value(model.objective)}")
+print("Оптимальный путь:")
+for p in suppliers:
+    for dc in dcs:
+        for m in stores:
+            if pulp.value(x[p, dc, m]) > 0:
+                flow = pulp.value(x[p, dc, m])
+                cars = pulp.value(v[dc, m])
+                print(f"[{p} -> {dc} -> {m}] | Единиц: {flow} | Нанято машин: {cars}")
